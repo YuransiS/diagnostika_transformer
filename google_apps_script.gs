@@ -33,21 +33,43 @@ function doPost(e) {
 function handleRequest(e) {
   const props = PropertiesService.getScriptProperties().getProperties();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheets().find(s => s.getSheetId() === 0) || ss.getSheets()[0];
   
   const callback = e.parameter.callback;
 
-  // 1. Ендпоінт для перевірки статусу (для thanks.html)
+  let data;
+  if (e.postData && e.postData.contents) {
+    try {
+      data = JSON.parse(e.postData.contents);
+    } catch (err) {
+      data = e.parameter;
+    }
+  } else {
+    data = e.parameter;
+  }
+
+  // Determine which sheet tab to use based on sheetId parameter (dynamic)
+  let sheetId = parseInt(data.sheetId || e.parameter.sheetId, 10);
+  if (isNaN(sheetId)) {
+    sheetId = 0;
+  }
+  const sheet = ss.getSheets().find(s => s.getSheetId() === sheetId) || ss.getSheets().find(s => s.getSheetId() === 0) || ss.getSheets()[0];
+
+  // 1. Ендпоінт для перевірки статусу (для thanks.html) - шукаємо по всіх вкладках
   if (e.parameter.action === 'checkStatus' && e.parameter.orderReference) {
     const orderRef = e.parameter.orderReference;
-    const rows = sheet.getDataRange().getValues();
-    let currentStatus = 'NotFound'; // По замовчуванню - не знайдено
+    const sheets = ss.getSheets();
+    let currentStatus = 'NotFound';
     
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (rows[i][6] == orderRef) { // Column G is orderReference
-        currentStatus = rows[i][5]; // Column F is status
-        break;
+    for (let s = 0; s < sheets.length; s++) {
+      const sheetInstance = sheets[s];
+      const rows = sheetInstance.getDataRange().getValues();
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i][6] == orderRef) { // Column G is orderReference
+          currentStatus = rows[i][5]; // Column F is status
+          break;
+        }
       }
+      if (currentStatus !== 'NotFound') break;
     }
     
     const result = {
@@ -62,36 +84,47 @@ function handleRequest(e) {
     return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
   }
 
-  let data;
-  if (e.postData && e.postData.contents) {
-    try {
-      data = JSON.parse(e.postData.contents);
-    } catch (err) {
-      data = e.parameter;
-    }
-  } else {
-    data = e.parameter;
-  }
-
   // CASE 1: New Lead from Website (Handles both POST and GET/JSONP)
   if (data.name && data.phone && !data.transactionStatus) {
     const orderReference = data.orderReference || ('ORD-' + new Date().getTime());
     const amount = data.amount || CONSTANTS.AMOUNT;
     
-    sheet.appendRow([
-      data.date || new Date().toLocaleString("uk-UA"),
-      data.name,
-      data.phone,
-      data.telegram || '',
-      amount,
-      'Очікує оплати',
-      orderReference,
-      data.utm_source || '',
-      data.utm_medium || '',
-      data.utm_campaign || '',
-      data.utm_content || '',
-      data.utm_term || ''
-    ]);
+    let rowData;
+    if (sheet.getSheetId() === 1078942174) {
+      // 11 columns structure for Samorevizia:
+      // Час | Ім'я | Телефон | Телеграм | Ціна | Статус | Номер замовлення | UTM Source | UTM Medium | UTM Campaign | UTM Temp
+      rowData = [
+        data.date || new Date().toLocaleString("uk-UA"),
+        data.name,
+        data.phone,
+        data.telegram || '',
+        amount,
+        'Очікує оплати',
+        orderReference,
+        data.utm_source || '',
+        data.utm_medium || '',
+        data.utm_campaign || '',
+        data.utm_term || data.utm_content || '' // UTM Temp (term or content as fallback)
+      ];
+    } else {
+      // Default 12 columns structure
+      rowData = [
+        data.date || new Date().toLocaleString("uk-UA"),
+        data.name,
+        data.phone,
+        data.telegram || '',
+        amount,
+        'Очікує оплати',
+        orderReference,
+        data.utm_source || '',
+        data.utm_medium || '',
+        data.utm_campaign || '',
+        data.utm_content || '',
+        data.utm_term || ''
+      ];
+    }
+    
+    sheet.appendRow(rowData);
 
     const resultData = { status: 'success', orderReference: orderReference };
 
@@ -101,26 +134,34 @@ function handleRequest(e) {
     return ContentService.createTextOutput(JSON.stringify(resultData)).setMimeType(ContentService.MimeType.TEXT);
   }
 
-  // CASE 2: WayForPay Callback
+  // CASE 2: WayForPay Callback - шукаємо по всіх вкладках для оновлення статусу
   if (e.postData && e.postData.contents) {
     const wfpData = JSON.parse(e.postData.contents);
     const orderRef = wfpData.orderReference;
     const status = wfpData.transactionStatus;
     
-    const rows = sheet.getDataRange().getValues();
+    const sheets = ss.getSheets();
     let rowIndex = -1;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i][6] == orderRef) {
-        rowIndex = i + 1;
-        break;
+    let targetSheet = null;
+    
+    for (let s = 0; s < sheets.length; s++) {
+      const sheetInstance = sheets[s];
+      const rows = sheetInstance.getDataRange().getValues();
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i][6] == orderRef) { // Column G is orderReference
+          rowIndex = i + 1;
+          targetSheet = sheetInstance;
+          break;
+        }
       }
+      if (rowIndex !== -1) break;
     }
 
-    if (rowIndex !== -1) {
+    if (rowIndex !== -1 && targetSheet) {
       if (status === 'Approved') {
-        sheet.getRange(rowIndex, 6).setValue('Оплачено');
+        targetSheet.getRange(rowIndex, 6).setValue('Оплачено');
       } else {
-        sheet.getRange(rowIndex, 6).setValue('Відхилено: ' + status);
+        targetSheet.getRange(rowIndex, 6).setValue('Відхилено: ' + status);
       }
     }
 
